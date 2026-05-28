@@ -7,7 +7,6 @@ const modifierInput = document.querySelector("#modifier");
 const dicePresetInput = document.querySelector("#dicePreset");
 const soundPresetInput = document.querySelector("#soundPreset");
 const rollModeInput = document.querySelector("#rollMode");
-const openRouterKeyInput = document.querySelector("#openRouterKey");
 const rollButton = document.querySelector("#rollButton");
 const situationCard = document.querySelector("#situationCard");
 const situationInput = document.querySelector("#situationInput");
@@ -23,7 +22,7 @@ const rollStatus = document.querySelector("#rollStatus");
 const rollHint = document.querySelector("#rollHint");
 const resultBox = rollButton;
 const difficultyModel = "google/gemini-3.1-flash-lite";
-const openRouterKeyStorageKey = "rollitOpenRouterKey";
+const openRouterKey = import.meta.env.VITE_OPENROUTER_KEY ?? "";
 
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 100);
@@ -403,24 +402,6 @@ function parseDifficultyChoice(content) {
   return { dc, label, reason };
 }
 
-async function getOpenRouterKey() {
-  if (globalThis.chrome?.storage?.local) {
-    const stored = await chrome.storage.local.get(openRouterKeyStorageKey);
-    return stored[openRouterKeyStorageKey] ?? "";
-  }
-
-  return localStorage.getItem(openRouterKeyStorageKey) ?? "";
-}
-
-async function saveOpenRouterKey(value) {
-  if (globalThis.chrome?.storage?.local) {
-    await chrome.storage.local.set({ [openRouterKeyStorageKey]: value });
-    return;
-  }
-
-  localStorage.setItem(openRouterKeyStorageKey, value);
-}
-
 function buildDifficultyMessages(situation, capture) {
   const context = capture
     ? `Captured screen title: ${capture.title || "Unknown"}\nCaptured screen URL: ${capture.url || "Unknown"}`
@@ -465,9 +446,8 @@ async function chooseDifficulty(capture = null) {
   setDifficultyStatus("AI choosing...");
 
   try {
-    const openRouterKey = await getOpenRouterKey();
     if (!openRouterKey) {
-      throw new Error("OpenRouter key missing. Add it in settings.");
+      throw new Error("OpenRouter key missing. Set VITE_OPENROUTER_KEY in .env before building.");
     }
 
     const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -821,18 +801,12 @@ rollModeInput.addEventListener("change", updateDiceLayout);
 soundPresetInput.addEventListener("change", () => {
   soundPreset = soundPresetInput.value;
 });
-openRouterKeyInput.addEventListener("change", () => {
-  saveOpenRouterKey(openRouterKeyInput.value.trim());
-});
 settingsToggle.addEventListener("click", () => {
   const expanded = settingsToggle.getAttribute("aria-expanded") === "true";
   settingsToggle.setAttribute("aria-expanded", String(!expanded));
   settingsPanel.hidden = expanded;
 });
 window.addEventListener("resize", resize);
-getOpenRouterKey().then((key) => {
-  openRouterKeyInput.value = key;
-});
 applyDicePreset(dicePresetInput.value);
 updateDiceLayout();
 resize();
