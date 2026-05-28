@@ -3,8 +3,22 @@
   "name": "Rollit",
   "version": "0.1.0",
   "description": "Roll a 3D d20 for quick D&D-style checks.",
+  "permissions": ["activeTab", "storage", "tabs", "windows"],
+  "host_permissions": ["https://openrouter.ai/*"],
   "action": {
     "default_popup": "index.html",
     "default_title": "Rollit"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "commands": {
+    "capture-and-roll": {
+      "suggested_key": {
+        "default": "Alt+Shift+R",
+        "mac": "Alt+Shift+R"
+      },
+      "description": "Capture the current screen and roll against an AI chosen DC"
+    }
   }
 }

@@ -12,21 +12,34 @@ body {
   margin: 0;
   min-width: 340px;
   min-height: 520px;
+  --outcome-hue: rgba(255, 255, 255, 0);
   background:
+    radial-gradient(circle at 50% 32%, var(--outcome-hue), transparent 58%),
     radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.12), transparent 32%),
     linear-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px),
     #000;
   background-size:
     100% 100%,
+    100% 100%,
     28px 28px,
     28px 28px,
     auto;
+  transition: background 420ms ease;
+}
+
+body.outcome-pass {
+  --outcome-hue: rgba(52, 199, 89, 0.18);
+}
+
+body.outcome-fail {
+  --outcome-hue: rgba(255, 69, 58, 0.18);
 }
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -84,6 +97,18 @@ p {
   font-size: 13px;
 }
 
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .settings-toggle {
   width: 38px;
   min-height: 38px;
@@ -105,6 +130,7 @@ p {
 }
 
 .result {
+  display: none;
   --mx: 50%;
   --my: 50%;
   --near: 0;
@@ -117,7 +143,6 @@ p {
     linear-gradient(135deg, rgba(43, 35, 22, 0.92), rgba(10, 10, 11, 0.94));
   color: #f8f3e8;
   cursor: pointer;
-  display: grid;
   grid-template-columns: auto 1fr;
   justify-content: center;
   align-items: center;
@@ -299,8 +324,26 @@ label.wide {
   grid-column: 1 / -1;
 }
 
+.shortcut-setting {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 6px;
+  color: #cfc7ba;
+  font-size: 12px;
+  font-weight: 700;
+  font-variant: small-caps;
+  text-transform: uppercase;
+}
+
+.shortcut-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
 input,
-select {
+select,
+textarea {
   width: 100%;
   min-height: 42px;
   border: 1px solid rgba(255, 255, 255, 0.16);
@@ -309,6 +352,14 @@ select {
   color: #fff7df;
   padding: 0 11px;
   outline: none;
+}
+
+textarea {
+  min-height: 52px;
+  max-height: 52px;
+  padding: 14px 16px;
+  resize: none;
+  line-height: 1.25;
 }
 
 select {
@@ -326,7 +377,8 @@ select {
 }
 
 input:focus,
-select:focus {
+select:focus,
+textarea:focus {
   border-color: #f2b84b;
 }
 
@@ -343,6 +395,99 @@ button:not(.result):not(.settings-toggle) {
 button:not(.result):disabled {
   cursor: wait;
   opacity: 0.7;
+}
+
+.situation-card {
+  display: grid;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.situation-label {
+  text-transform: uppercase;
+}
+
+.situation-card.is-choosing .situation-label {
+  display: none;
+}
+
+.difficulty-loader {
+  min-height: 52px;
+  display: grid;
+  grid-template-columns: repeat(3, 16px);
+  place-content: center;
+  justify-content: center;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid rgba(242, 184, 75, 0.24);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.34);
+}
+
+.difficulty-loader[hidden] {
+  display: none;
+}
+
+.difficulty-loader span {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #f2b84b;
+  box-shadow: 0 0 18px rgba(242, 184, 75, 0.5);
+  animation: dc-pulse 850ms ease-in-out infinite;
+}
+
+.difficulty-loader span:nth-child(2) {
+  animation-delay: 120ms;
+}
+
+.difficulty-loader span:nth-child(3) {
+  animation-delay: 240ms;
+}
+
+.difficulty-loader p {
+  grid-column: 1 / -1;
+  justify-self: center;
+  color: #d8c69d;
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.situation-actions {
+  display: grid;
+  grid-template-columns: 1fr;
+  align-items: stretch;
+  gap: 8px;
+}
+
+#chooseDifficulty {
+  display: none;
+}
+
+.ai-difficulty {
+  min-height: 0;
+  max-height: 96px;
+  overflow-y: auto;
+  padding: 10px 12px;
+  border: 1px solid rgba(242, 184, 75, 0.18);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.22);
+  color: #d8c69d;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+  text-transform: none;
+  white-space: pre-wrap;
+}
+
+.ai-difficulty:empty,
+.situation-card.is-choosing .ai-difficulty {
+  display: none;
 }
 
 @keyframes pass-pop {
@@ -403,5 +548,17 @@ button:not(.result):disabled {
   }
   72% {
     transform: translateX(3px);
+  }
+}
+
+@keyframes dc-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: translateY(0) scale(0.78);
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(-7px) scale(1);
   }
 }
