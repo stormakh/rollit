@@ -22,6 +22,12 @@ Use the Vite dev server for fast UI iteration.
 
 ## Extension Build
 
+Create `.env` first:
+
+```bash
+VITE_OPENROUTER_KEY=sk-or-v1-your-key-here
+```
+
 ```bash
 bun run build
 ```

@@ -13,8 +13,8 @@
     "service_worker": "background.js",
     "type": "module"
   },
-  "permissions": ["activeTab", "storage", "tabs", "scripting", "sidePanel"],
-  "host_permissions": ["<all_urls>"],
+  "permissions": ["activeTab", "storage", "tabs", "scripting", "sidePanel", "windows"],
+  "host_permissions": ["<all_urls>", "https://openrouter.ai/*"],
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
@@ -22,5 +22,14 @@
       "run_at": "document_idle",
       "all_frames": false
     }
-  ]
+  ],
+  "commands": {
+    "capture-and-roll": {
+      "suggested_key": {
+        "default": "Alt+Shift+R",
+        "mac": "Alt+Shift+R"
+      },
+      "description": "Capture the current screen and roll against an AI chosen DC"
+    }
+  }
 }

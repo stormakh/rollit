@@ -25,15 +25,21 @@ const dicePresetInput = document.querySelector("#dicePreset");
 const soundPresetInput = document.querySelector("#soundPreset");
 const rollModeInput = document.querySelector("#rollMode");
 const rollButton = document.querySelector("#rollButton");
+const situationCard = document.querySelector("#situationCard");
+const situationInput = document.querySelector("#situationInput");
+const chooseDifficultyButton = document.querySelector("#chooseDifficulty");
+const difficultyLoader = document.querySelector("#difficultyLoader");
+const aiDifficulty = document.querySelector("#aiDifficulty");
+const captureShortcutButton = document.querySelector("#captureShortcut");
+const shortcutSettingsButton = document.querySelector("#shortcutSettings");
 const settingsToggle = document.querySelector("#settingsToggle");
 const settingsPanel = document.querySelector("#settingsPanel");
 const rollValue = document.querySelector("#rollValue");
 const rollStatus = document.querySelector("#rollStatus");
 const rollHint = document.querySelector("#rollHint");
 const resultBox = rollButton;
-const pickButton = document.querySelector("#pickButton");
-const pickLabel = document.querySelector("#pickLabel");
-const clearTargetButton = document.querySelector("#clearTargetButton");
+const difficultyModel = "google/gemini-3.1-flash-lite";
+const openRouterKey = import.meta.env.VITE_OPENROUTER_KEY ?? "";
 
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 100);
@@ -71,9 +77,15 @@ const goldEdgeMaterial = new THREE.MeshStandardMaterial({
   metalness: 0.95
 });
 const goldEdgeGroup = createGoldEdges();
+goldEdgeGroup.name = "gold-edge-group";
 die.add(goldEdgeGroup);
 const faceNumbers = createFaceNumbers();
 die.add(faceNumbers);
+const secondDie = die.clone(true);
+secondDie.visible = false;
+scene.add(secondDie);
+const dice = [die, secondDie];
+const goldEdgeGroups = [goldEdgeGroup, secondDie.getObjectByName("gold-edge-group")];
 
 const dicePresets = {
   crimson: {
@@ -146,10 +158,10 @@ scene.add(keyLight);
 let rolling = false;
 let rollStart = 0;
 let rollDuration = 0;
-let landingQuaternion = die.quaternion.clone();
+let landingQuaternions = dice.map((diceMesh) => diceMesh.quaternion.clone());
 let rollLastFrame = 0;
-let spinVelocity = new THREE.Vector3();
-let residualAxis = new THREE.Vector3(1, 0, 0);
+let spinVelocities = dice.map(() => new THREE.Vector3());
+let residualAxes = dice.map(() => new THREE.Vector3(1, 0, 0));
 let holdUntil = 0;
 let pendingResult = null;
 let audioContext = null;
@@ -162,6 +174,7 @@ let dragLastX = 0;
 let dragLastY = 0;
 let dragLastTime = 0;
 let inertiaVelocity = new THREE.Vector2(0, 0);
+let currentDifficultyText = "";
 
 const soundPresets = {
   arcade: {
@@ -201,6 +214,8 @@ const soundPresets = {
   }
 };
 
+const masterSoundGain = 2.4;
+
 function getAudioContext() {
   audioContext ??= new AudioContext();
   return audioContext;
@@ -215,7 +230,7 @@ function playTone({ frequency, duration, type = "sine", gain = 0.08, start = 0 }
   oscillator.type = type;
   oscillator.frequency.setValueAtTime(frequency, now);
   volume.gain.setValueAtTime(0.0001, now);
-  volume.gain.exponentialRampToValueAtTime(gain, now + 0.015);
+  volume.gain.exponentialRampToValueAtTime(gain * masterSoundGain, now + 0.015);
   volume.gain.exponentialRampToValueAtTime(0.0001, now + duration);
 
   oscillator.connect(volume);
@@ -324,7 +339,9 @@ function applyDicePreset(name) {
   material.needsUpdate = true;
   edgeMaterial.color.setHex(preset.edge);
   edgeMaterial.opacity = preset.fatEdges ? 0.35 : 0.8;
-  goldEdgeGroup.visible = Boolean(preset.fatEdges);
+  goldEdgeGroups.forEach((edgeGroup) => {
+    edgeGroup.visible = Boolean(preset.fatEdges);
+  });
   goldEdgeMaterial.color.setHex(0xf1c65b);
   numberMaterials.forEach((numberMaterial) => {
     numberMaterial.color.setHex(preset.numbers);
@@ -339,6 +356,29 @@ function resize() {
   camera.updateProjectionMatrix();
 }
 
+function getVisibleDice() {
+  return dice.filter((diceMesh) => diceMesh.visible);
+}
+
+function updateDiceLayout() {
+  const useTwoDice = rollModeInput.value !== "normal";
+  secondDie.visible = useTwoDice;
+
+  if (useTwoDice) {
+    die.position.x = -0.88;
+    secondDie.position.x = 0.88;
+    dice.forEach((diceMesh) => {
+      diceMesh.position.y = 0;
+      diceMesh.position.z = 0;
+      diceMesh.scale.setScalar(0.62);
+    });
+    return;
+  }
+
+  die.position.set(0, 0, 0);
+  die.scale.setScalar(1);
+}
+
 function randomD20() {
   if (diceEngine) return diceEngine.rollSync().value;
   // Fallback when engine not initialized: rejection sampling to avoid modulo bias.
@@ -349,6 +389,155 @@ function randomD20() {
     crypto.getRandomValues(values);
     if (values[0] < LIMIT) return (values[0] % RANGE) + 1;
   }
+}
+
+function setDifficultyStatus(message) {
+  aiDifficulty.textContent = message;
+}
+
+function setDifficultyLoading(isLoading) {
+  situationCard.classList.toggle("is-choosing", isLoading);
+  difficultyLoader.hidden = !isLoading;
+  situationInput.hidden = isLoading;
+}
+
+function showChosenDc(dc) {
+  rollValue.hidden = false;
+  rollValue.textContent = String(dc);
+  rollStatus.textContent = "Roll";
+  rollHint.textContent = `DC ${dc}`;
+  resultBox.dataset.outcome = "";
+  resultBox.classList.remove("is-pass", "is-fail", "is-rolling");
+}
+
+function parseDifficultyChoice(content) {
+  const match = content.match(/\{[\s\S]*\}/);
+  if (!match) throw new Error("AI response missing JSON");
+  const parsed = JSON.parse(match[0]);
+  const dc = Number.parseInt(parsed.dc, 10);
+  const label = String(parsed.label ?? "Custom");
+  const reason = String(parsed.reason ?? "Situation judged");
+
+  if (!Number.isInteger(dc) || dc < 1 || dc > 20) {
+    throw new Error("AI response used invalid DC");
+  }
+
+  return { dc, label, reason };
+}
+
+function buildDifficultyMessages(situation, capture) {
+  const context = capture
+    ? `Captured screen title: ${capture.title || "Unknown"}\nCaptured screen URL: ${capture.url || "Unknown"}`
+    : "";
+  const userText = situation
+    ? `Situation: ${situation}\n${context}`
+    : `Analyze the screenshot. Infer what is happening or what the user is trying to do, then choose a DC.\n${context}`;
+  const userContent = [{ type: "text", text: userText.trim() }];
+
+  if (capture?.screenshot) {
+    userContent.push({
+      type: "image_url",
+      image_url: {
+        url: capture.screenshot
+      }
+    });
+  }
+
+  return [
+    {
+      role: "system",
+      content: "Choose a tabletop d20 difficulty class from 1 to 20 so an unmodified d20 roll can meet it. If an image is provided, analyze what is happening or what the user appears to be trying to do. Return only JSON: {\"dc\":number,\"label\":\"Easy|Medium|Hard|Very Hard|Legendary\",\"reason\":\"short reason\"}."
+    },
+    {
+      role: "user",
+      content: userContent
+    }
+  ];
+}
+
+async function chooseDifficulty(capture = null) {
+  const situation = situationInput.value.trim();
+  if (!situation && !capture?.screenshot) {
+    setDifficultyStatus("Describe situation first");
+    situationInput.focus();
+    return;
+  }
+
+  chooseDifficultyButton.disabled = true;
+  document.body.classList.remove("outcome-pass", "outcome-fail");
+  setDifficultyLoading(true);
+  setDifficultyStatus("AI choosing...");
+
+  try {
+    if (!openRouterKey) {
+      throw new Error("OpenRouter key missing. Set VITE_OPENROUTER_KEY in .env before building.");
+    }
+
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${openRouterKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": location.origin,
+        "X-Title": "Rollit"
+      },
+      body: JSON.stringify({
+        model: difficultyModel,
+        messages: buildDifficultyMessages(situation, capture),
+        temperature: 0.2,
+        max_tokens: 120
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`OpenRouter ${response.status}`);
+    }
+
+    const data = await response.json();
+    const content = data.choices?.[0]?.message?.content ?? "";
+    const choice = parseDifficultyChoice(content);
+    if (capture?.screenshot && !situation) {
+      situationInput.value = "Screen capture";
+    }
+    dcInput.value = String(choice.dc);
+    showChosenDc(choice.dc);
+    currentDifficultyText = `DC ${choice.dc} - ${choice.label}: ${choice.reason}`;
+    setDifficultyStatus(`${currentDifficultyText}\nRolling...`);
+    roll();
+  } catch (error) {
+    console.error(error);
+    setDifficultyStatus(`AI difficulty failed: ${error.message}`);
+  } finally {
+    setDifficultyLoading(false);
+    chooseDifficultyButton.disabled = false;
+  }
+}
+
+async function captureCurrentTab() {
+  if (globalThis.chrome?.runtime) {
+    try {
+      const response = await chrome.runtime.sendMessage({ type: "capture-current-screen" });
+      if (response?.ok) return response.capture;
+      throw new Error(response?.error || "Unknown capture error");
+    } catch (error) {
+      if (!globalThis.chrome?.tabs || !globalThis.chrome?.windows) throw error;
+    }
+  }
+
+  if (!globalThis.chrome?.tabs || !globalThis.chrome?.windows) {
+    throw new Error("Chrome capture APIs unavailable");
+  }
+
+  const window = await chrome.windows.getLastFocused({ windowTypes: ["normal"] });
+  const [tab] = await chrome.tabs.query({ active: true, windowId: window.id });
+  const screenshot = await chrome.tabs.captureVisibleTab(window.id, { format: "png" });
+
+  return {
+    screenshot,
+    title: tab.title ?? "",
+    url: tab.url ?? "",
+    capturedAt: Date.now()
+  };
 }
 
 function getLandingQuaternion(number) {
@@ -362,8 +551,8 @@ function getLandingQuaternion(number) {
 function roll() {
   if (rolling) return;
   void getAudioContext().resume();
+  document.body.classList.remove("outcome-pass", "outcome-fail");
 
-  // Freeze the active page around the locked target before dice animation starts.
   if (currentTarget) {
     sendToTab({ type: "ROLLIT_FREEZE_START" });
   }
@@ -376,11 +565,12 @@ function roll() {
     : rollMode === "disadvantage"
       ? Math.min(firstRoll, secondRoll)
       : firstRoll;
-  const dc = Number.parseInt(dcInput.value, 10) || 10;
+  const dc = Math.min(Math.max(Number.parseInt(dcInput.value, 10) || 10, 1), 20);
+  dcInput.value = String(dc);
   const modifier = Number.parseInt(modifierInput.value, 10) || 0;
   const total = natural + modifier;
 
-  // D&D rule: natural 20 always succeeds, natural 1 always fails, regardless of DC/modifier.
+  // D&D rule: nat 20 always passes, nat 1 always fails.
   let passed = total >= dc;
   if (natural === 20) passed = true;
   if (natural === 1) passed = false;
@@ -395,22 +585,30 @@ function roll() {
   resultBox.dataset.outcome = "";
   resultBox.classList.remove("is-pass", "is-fail", "is-rolling");
   resultBox.classList.add("is-rolling");
-  die.userData.hitPulse = 0;
+  updateDiceLayout();
+  dice.forEach((diceMesh) => {
+    diceMesh.userData.hitPulse = 0;
+  });
   holdUntil = 0;
   startRollSound();
 
   rollStart = performance.now();
   rollLastFrame = rollStart;
   rollDuration = 2100;
-  landingQuaternion = getLandingQuaternion(natural);
-  spinVelocity.set(
-    8 + Math.random() * 4,
-    12 + Math.random() * 5,
-    6 + Math.random() * 4
-  );
-  if (Math.random() > 0.5) spinVelocity.x *= -1;
-  if (Math.random() > 0.5) spinVelocity.z *= -1;
-  residualAxis = spinVelocity.clone().normalize();
+  landingQuaternions = [
+    getLandingQuaternion(firstRoll),
+    getLandingQuaternion(secondRoll ?? firstRoll)
+  ];
+  getVisibleDice().forEach((diceMesh, index) => {
+    spinVelocities[index].set(
+      8 + Math.random() * 4,
+      12 + Math.random() * 5,
+      6 + Math.random() * 4
+    );
+    if (Math.random() > 0.5) spinVelocities[index].x *= -1;
+    if (Math.random() > 0.5) spinVelocities[index].z *= -1;
+    residualAxes[index] = spinVelocities[index].clone().normalize();
+  });
   window.clearTimeout(rollFallbackTimer);
   rollFallbackTimer = window.setTimeout(() => {
     if (rolling) finishRoll();
@@ -423,10 +621,12 @@ function finishRoll() {
   rollButton.removeAttribute("aria-busy");
   window.clearTimeout(rollFallbackTimer);
   holdUntil = performance.now() + 3200;
-  die.quaternion.copy(landingQuaternion);
+  getVisibleDice().forEach((diceMesh, index) => {
+    diceMesh.quaternion.copy(landingQuaternions[index]);
+  });
   stopRollSound();
 
-  const { natural, firstRoll, secondRoll, rollMode, passed } = pendingResult;
+  const { natural, firstRoll, secondRoll, rollMode, passed, total, dc } = pendingResult;
   resultBox.classList.remove("is-rolling");
   rollValue.classList.remove("value-reveal");
   void rollValue.offsetWidth;
@@ -437,9 +637,16 @@ function finishRoll() {
   rollHint.textContent = rollMode === "normal"
     ? "Click to roll again"
     : `${rollMode === "advantage" ? "Adv" : "Dis"} ${firstRoll}/${secondRoll} - click again`;
+  if (currentDifficultyText) {
+    const modifierText = total === natural ? "" : ` (${natural} + mod = ${total})`;
+    setDifficultyStatus(`${currentDifficultyText}\nRolled ${natural}${modifierText} vs DC ${dc} - ${passed ? "Success" : "Fail"}`);
+  }
   resultBox.dataset.outcome = passed ? "pass" : "fail";
   resultBox.classList.add(passed ? "is-pass" : "is-fail");
-  die.userData.hitPulse = passed ? 1 : -1;
+  document.body.classList.add(passed ? "outcome-pass" : "outcome-fail");
+  getVisibleDice().forEach((diceMesh) => {
+    diceMesh.userData.hitPulse = passed ? 1 : -1;
+  });
   playOutcomeSound(passed);
 
   // Trigger lock animation + (on pass) auto-click in the active tab.
@@ -454,56 +661,118 @@ function animate(now = performance.now()) {
     const deltaSeconds = Math.min((now - rollLastFrame) / 1000, 0.04);
     rollLastFrame = now;
 
-    const speed = spinVelocity.length();
-    if (speed > 0.001) {
-      const axis = spinVelocity.clone().normalize();
-      const spinStep = new THREE.Quaternion().setFromAxisAngle(axis, speed * deltaSeconds);
-      die.quaternion.multiply(spinStep);
-    }
-
     const settle = Math.max((progress - 0.58) / 0.42, 0);
     const damping = 1 - (0.55 + settle * 2.6) * deltaSeconds;
-    spinVelocity.multiplyScalar(Math.max(damping, 0));
 
-    if (settle > 0) {
-      const correction = 0.025 + 0.18 * settle * settle;
-      const residual = new THREE.Quaternion().setFromAxisAngle(
-        residualAxis,
-        0.18 * Math.sin(settle * Math.PI * 7) * (1 - settle)
-      );
-      const target = landingQuaternion.clone().multiply(residual);
-      die.quaternion.slerp(target, correction);
-    }
+    getVisibleDice().forEach((diceMesh, index) => {
+      const spinVelocity = spinVelocities[index];
+      const speed = spinVelocity.length();
+      if (speed > 0.001) {
+        const axis = spinVelocity.clone().normalize();
+        const spinStep = new THREE.Quaternion().setFromAxisAngle(axis, speed * deltaSeconds);
+        diceMesh.quaternion.multiply(spinStep);
+      }
+
+      spinVelocity.multiplyScalar(Math.max(damping, 0));
+
+      if (settle > 0) {
+        const correction = 0.025 + 0.18 * settle * settle;
+        const residual = new THREE.Quaternion().setFromAxisAngle(
+          residualAxes[index],
+          0.18 * Math.sin(settle * Math.PI * 7) * (1 - settle)
+        );
+        const target = landingQuaternions[index].clone().multiply(residual);
+        diceMesh.quaternion.slerp(target, correction);
+      }
+    });
 
     if (progress >= 1) finishRoll();
   } else if (!draggingDie && now > holdUntil) {
     const inertiaSpeed = inertiaVelocity.length();
     if (inertiaSpeed > 0.0005) {
-      die.rotation.y += inertiaVelocity.x;
-      die.rotation.x += inertiaVelocity.y;
+      getVisibleDice().forEach((diceMesh) => {
+        diceMesh.rotation.y += inertiaVelocity.x;
+        diceMesh.rotation.x += inertiaVelocity.y;
+      });
       inertiaVelocity.multiplyScalar(0.965);
     } else {
       inertiaVelocity.set(0, 0);
-      die.rotation.y += 0.006;
-      die.rotation.x += 0.002;
+      getVisibleDice().forEach((diceMesh, index) => {
+        const direction = index === 0 ? 1 : -1;
+        diceMesh.rotation.y += 0.006 * direction;
+        diceMesh.rotation.x += 0.002;
+      });
     }
   }
 
-  if (die.userData.hitPulse) {
-    const pulse = die.userData.hitPulse;
-    const targetScale = pulse > 0 ? 1.12 : 0.92;
-    die.scale.setScalar(THREE.MathUtils.lerp(die.scale.x, targetScale, 0.18));
-    if (Math.abs(die.scale.x - targetScale) < 0.01) {
-      die.userData.hitPulse = 0;
+  getVisibleDice().forEach((diceMesh) => {
+    const layoutScale = rollModeInput.value === "normal" ? 1 : 0.62;
+    if (diceMesh.userData.hitPulse) {
+      const pulse = diceMesh.userData.hitPulse;
+      const targetScale = layoutScale * (pulse > 0 ? 1.12 : 0.92);
+      diceMesh.scale.setScalar(THREE.MathUtils.lerp(diceMesh.scale.x, targetScale, 0.18));
+      if (Math.abs(diceMesh.scale.x - targetScale) < 0.01) {
+        diceMesh.userData.hitPulse = 0;
+      }
+    } else {
+      diceMesh.scale.setScalar(THREE.MathUtils.lerp(diceMesh.scale.x, layoutScale, 0.12));
     }
-  } else {
-    die.scale.setScalar(THREE.MathUtils.lerp(die.scale.x, 1, 0.12));
-  }
+  });
 
   renderer.render(scene, camera);
 }
 
 rollButton.addEventListener("click", roll);
+chooseDifficultyButton.addEventListener("click", chooseDifficulty);
+captureShortcutButton.addEventListener("click", async () => {
+  if (!globalThis.chrome?.tabs) {
+    setDifficultyStatus("Load extension to capture screen");
+    return;
+  }
+
+  try {
+    chooseDifficulty(await captureCurrentTab());
+  } catch (error) {
+    console.error(error);
+    setDifficultyStatus(`Screen capture failed: ${error.message}`);
+  }
+});
+shortcutSettingsButton.addEventListener("click", () => {
+  if (globalThis.chrome?.tabs) {
+    chrome.tabs.create({ url: "chrome://extensions/shortcuts" });
+    return;
+  }
+
+  setDifficultyStatus("Open chrome://extensions/shortcuts to change shortcut");
+});
+situationInput.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.shiftKey) return;
+  event.preventDefault();
+  chooseDifficulty();
+});
+
+async function consumePendingCapture() {
+  if (!globalThis.chrome?.storage?.local) return false;
+
+  const { pendingCapture, pendingCaptureError } = await chrome.storage.local.get([
+    "pendingCapture",
+    "pendingCaptureError"
+  ]);
+  if (pendingCaptureError) {
+    await chrome.storage.local.remove("pendingCaptureError");
+    setDifficultyStatus(`Screen capture failed: ${pendingCaptureError}`);
+    return true;
+  }
+  if (!pendingCapture?.screenshot) return false;
+
+  await chrome.storage.local.remove("pendingCapture");
+  chooseDifficulty(pendingCapture);
+  return true;
+}
+
+async function startCaptureOnOpen() {
+  await consumePendingCapture();
+}
 canvas.addEventListener("pointerdown", (event) => {
   if (rolling) return;
   draggingDie = true;
@@ -529,8 +798,10 @@ canvas.addEventListener("pointermove", (event) => {
     (deltaY / deltaTime) * 0.16
   );
   inertiaVelocity.lerp(nextVelocity, 0.35);
-  die.rotation.y += deltaX * 0.01;
-  die.rotation.x += deltaY * 0.01;
+  getVisibleDice().forEach((diceMesh) => {
+    diceMesh.rotation.y += deltaX * 0.01;
+    diceMesh.rotation.x += deltaY * 0.01;
+  });
 });
 function endDieDrag(event) {
   draggingDie = false;
@@ -561,6 +832,7 @@ window.addEventListener("pointermove", (event) => {
   rollButton.style.setProperty("--near", proximity.toFixed(3));
 });
 dicePresetInput.addEventListener("change", () => applyDicePreset(dicePresetInput.value));
+rollModeInput.addEventListener("change", updateDiceLayout);
 soundPresetInput.addEventListener("change", () => {
   soundPreset = soundPresetInput.value;
 });
@@ -571,13 +843,19 @@ settingsToggle.addEventListener("click", () => {
 });
 window.addEventListener("resize", resize);
 applyDicePreset(dicePresetInput.value);
+updateDiceLayout();
 resize();
+startCaptureOnOpen();
 animate();
 
 // ------------------------------------------------------------------
 // Target panel: pick a DOM element on the active tab and lock it.
 // On a successful roll, content-script clicks the target automatically.
 // ------------------------------------------------------------------
+
+const pickButton = document.querySelector("#pickButton");
+const pickLabel = document.querySelector("#pickLabel");
+const clearTargetButton = document.querySelector("#clearTargetButton");
 
 let currentTarget = null;
 
@@ -611,7 +889,6 @@ async function sendToTab(message, { autoInject = true } = {}) {
       console.warn("[rollit] tab message failed:", err?.message ?? err);
       return null;
     }
-    // Likely no content script in tab yet (page predates extension install).
     const injected = await ensureContentScript(tabId);
     if (!injected) return null;
     try {
@@ -625,15 +902,16 @@ async function sendToTab(message, { autoInject = true } = {}) {
 
 function renderTarget(target) {
   currentTarget = target;
+  if (!pickButton || !pickLabel) return;
   if (target) {
     pickLabel.textContent = target.label || target.selector;
     pickButton.classList.add("has-target");
-    clearTargetButton.hidden = false;
-    rollHint.textContent = "Roll to let luck decide.";
+    if (clearTargetButton) clearTargetButton.hidden = false;
+    if (rollHint) rollHint.textContent = "Roll to let luck decide.";
   } else {
     pickLabel.textContent = "Pick target";
     pickButton.classList.remove("has-target");
-    clearTargetButton.hidden = true;
+    if (clearTargetButton) clearTargetButton.hidden = true;
   }
 }
 
@@ -644,18 +922,17 @@ async function refreshTargetFromStorage() {
 }
 
 async function startPickFlow() {
+  if (!pickButton || !pickLabel) return;
   pickButton.disabled = true;
   pickLabel.textContent = "Click an element on the page…";
   const res = await sendToTab({ type: "ROLLIT_START_PICKER" });
   pickButton.disabled = false;
   if (!res || !res.ok) {
     pickLabel.textContent = "Pick target";
-    rollHint.textContent = "Cannot inject on this page. Try a normal site.";
+    if (rollHint) rollHint.textContent = "Cannot inject on this page. Try a normal site.";
     return;
   }
-  rollHint.textContent = "Pick an element on the page. Esc to cancel.";
-  // Side panel stays open while user interacts with the page.
-  // storage.onChanged listener will update the panel when the target is captured.
+  if (rollHint) rollHint.textContent = "Pick an element on the page. Esc to cancel.";
 }
 
 async function clearTarget() {
@@ -665,8 +942,6 @@ async function clearTarget() {
 }
 
 function sendExecuteToTab({ success, value, dc }) {
-  // Always send so the page-side animation runs for both pass and fail
-  // even if no target was picked (overlay-only mode).
   sendToTab({
     type: "ROLLIT_EXECUTE",
     payload: { success, value: Number(value), dc: Number(dc) },
@@ -674,17 +949,9 @@ function sendExecuteToTab({ success, value, dc }) {
 }
 
 if (pickButton && clearTargetButton) {
-  pickButton.addEventListener("click", () => {
-    if (currentTarget) {
-      // Already picked: re-pick replaces.
-      startPickFlow();
-    } else {
-      startPickFlow();
-    }
-  });
+  pickButton.addEventListener("click", () => startPickFlow());
   clearTargetButton.addEventListener("click", clearTarget);
 
-  // Live updates from storage (in case content script set target after popup opens).
   if (chrome?.storage?.onChanged) {
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area === "session" && "rollitTarget" in changes) {

@@ -4,5 +4,6 @@ dist
 .DS_Store
 .env
 .env.local
+.env.*.local
 research/results*.txt
 *.log
