@@ -1,0 +1,15 @@
+{
+  "name": "d20-randomness-bench",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "bench": "./bench.js"
+  },
+  "scripts": {
+    "bench": "bun run bench.js",
+    "test:engine": "bun run test-engine.js"
+  },
+  "dependencies": {
+    "random-js": "^2.1.0"
+  }
+}

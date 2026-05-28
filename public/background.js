@@ -1,3 +1,11 @@
+// Service worker: side panel + screen capture command.
+
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.sidePanel
+    .setPanelBehavior({ openPanelOnActionClick: true })
+    .catch((err) => console.warn("[rollit] sidePanel behavior failed:", err));
+});
+
 function formatCaptureError(error) {
   return error?.message || String(error);
 }
@@ -26,7 +34,12 @@ chrome.commands.onCommand.addListener(async (command) => {
     await chrome.storage.local.set({ pendingCaptureError: message });
   }
 
-  await chrome.action.openPopup();
+  try {
+    const window = await chrome.windows.getLastFocused({ windowTypes: ["normal"] });
+    await chrome.sidePanel.open({ windowId: window.id });
+  } catch (err) {
+    console.warn("[rollit] sidePanel.open failed:", err);
+  }
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

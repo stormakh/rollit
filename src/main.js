@@ -1,5 +1,22 @@
 import * as THREE from "three";
 import "./styles.css";
+import { createDiceEngine } from "./dice-engine.js";
+
+const RANDOM_ORG_KEY = import.meta.env.VITE_RANDOM_ORG_API_KEY;
+let diceEngine = null;
+
+if (RANDOM_ORG_KEY) {
+  diceEngine = createDiceEngine({
+    apiKey: RANDOM_ORG_KEY,
+    bufferSize: 1000,
+    onSourceChange: (src) => console.log(`[dice-engine] source: ${src}`),
+    onQuotaUpdate: (q) =>
+      console.log(`[dice-engine] quota bitsLeft=${q.bitsLeft} requestsLeft=${q.requestsLeft}`),
+  });
+  diceEngine.init().catch((err) => console.warn("[dice-engine] init failed:", err));
+} else {
+  console.warn("[dice-engine] VITE_RANDOM_ORG_API_KEY not set — using crypto fallback only");
+}
 
 const canvas = document.querySelector("#dice");
 const dcInput = document.querySelector("#dc");
@@ -363,13 +380,76 @@ function updateDiceLayout() {
 }
 
 function randomD20() {
+  if (diceEngine) return diceEngine.rollSync().value;
+  // Fallback when engine not initialized: rejection sampling to avoid modulo bias.
+  const RANGE = 20;
+  const LIMIT = Math.floor(0x100000000 / RANGE) * RANGE;
   const values = new Uint32Array(1);
-  crypto.getRandomValues(values);
-  return (values[0] % 20) + 1;
+  while (true) {
+    crypto.getRandomValues(values);
+    if (values[0] < LIMIT) return (values[0] % RANGE) + 1;
+  }
 }
 
+const aiStatusEl = document.querySelector("#aiStatus");
+const aiResultEl = document.querySelector("#aiResult");
+const aiDcEl = document.querySelector("#aiDc");
+const aiTierEl = document.querySelector("#aiTier");
+const aiReasonEl = document.querySelector("#aiReason");
+const aiRollEl = document.querySelector("#aiRoll");
+const aiRollValueEl = document.querySelector("#aiRollValue");
+const aiRollVsEl = document.querySelector("#aiRollVs");
+const aiRollOutcomeEl = document.querySelector("#aiRollOutcome");
+
 function setDifficultyStatus(message) {
-  aiDifficulty.textContent = message;
+  if (aiStatusEl) aiStatusEl.textContent = message ?? "";
+}
+
+const TIER_CLASS = {
+  Easy: "tier-easy",
+  Medium: "tier-medium",
+  Hard: "tier-hard",
+  "Very Hard": "tier-very-hard",
+  Legendary: "tier-legendary",
+};
+
+function setAiResult({ dc, label, reason } = {}) {
+  if (!aiResultEl) return;
+  if (dc == null) {
+    aiResultEl.hidden = true;
+    return;
+  }
+  aiResultEl.hidden = false;
+  if (aiDcEl) aiDcEl.textContent = `DC ${dc}`;
+  if (aiTierEl) {
+    aiTierEl.textContent = label || "";
+    aiTierEl.className = "ai-tier " + (TIER_CLASS[label] || "tier-unknown");
+  }
+  if (aiReasonEl) aiReasonEl.textContent = reason || "";
+  if (aiRollEl) aiRollEl.hidden = true;
+}
+
+function setAiRollOutcome({ natural, modifier, dc, passed } = {}) {
+  if (!aiRollEl) return;
+  if (natural == null) {
+    aiRollEl.hidden = true;
+    return;
+  }
+  aiRollEl.hidden = false;
+  if (aiRollValueEl) {
+    const modStr = modifier ? ` ${modifier > 0 ? "+" : ""}${modifier}` : "";
+    aiRollValueEl.textContent = `${natural}${modStr}`;
+  }
+  if (aiRollVsEl) aiRollVsEl.textContent = `vs DC ${dc}`;
+  if (aiRollOutcomeEl) {
+    aiRollOutcomeEl.textContent = passed ? "Success" : "Fail";
+    aiRollOutcomeEl.className = "ai-roll-outcome " + (passed ? "is-pass" : "is-fail");
+  }
+}
+
+function clearAiResult() {
+  if (aiResultEl) aiResultEl.hidden = true;
+  if (aiRollEl) aiRollEl.hidden = true;
 }
 
 function setDifficultyLoading(isLoading) {
@@ -432,8 +512,10 @@ function buildDifficultyMessages(situation, capture) {
   ];
 }
 
-async function chooseDifficulty(capture = null) {
-  const situation = situationInput.value.trim();
+async function chooseDifficulty(capture = null, { targetLabel = null, autoRoll = true } = {}) {
+  const situation = targetLabel
+    ? `User wants to click this element on the page: ${targetLabel}. Decide how risky/hard the action is and pick a DC.`
+    : situationInput.value.trim();
   if (!situation && !capture?.screenshot) {
     setDifficultyStatus("Describe situation first");
     situationInput.focus();
@@ -479,11 +561,18 @@ async function chooseDifficulty(capture = null) {
     dcInput.value = String(choice.dc);
     showChosenDc(choice.dc);
     currentDifficultyText = `DC ${choice.dc} - ${choice.label}: ${choice.reason}`;
-    setDifficultyStatus(`${currentDifficultyText}\nRolling...`);
-    roll();
+    setAiResult({ dc: choice.dc, label: choice.label, reason: choice.reason });
+    if (autoRoll) {
+      setDifficultyStatus("Rolling…");
+      roll();
+    } else {
+      setDifficultyStatus("Ready — press Roll.");
+    }
+    return { ok: true };
   } catch (error) {
     console.error(error);
     setDifficultyStatus(`AI difficulty failed: ${error.message}`);
+    return { ok: false, error };
   } finally {
     setDifficultyLoading(false);
     chooseDifficultyButton.disabled = false;
@@ -530,6 +619,10 @@ function roll() {
   void getAudioContext().resume();
   document.body.classList.remove("outcome-pass", "outcome-fail");
 
+  if (currentTarget) {
+    sendToTab({ type: "ROLLIT_FREEZE_START" });
+  }
+
   const rollMode = rollModeInput.value;
   const firstRoll = randomD20();
   const secondRoll = rollMode === "normal" ? null : randomD20();
@@ -543,7 +636,12 @@ function roll() {
   const modifier = Number.parseInt(modifierInput.value, 10) || 0;
   const total = natural + modifier;
 
-  pendingResult = { natural, firstRoll, secondRoll, rollMode, modifier, total, dc, passed: total >= dc };
+  // D&D rule: nat 20 always passes, nat 1 always fails.
+  let passed = total >= dc;
+  if (natural === 20) passed = true;
+  if (natural === 1) passed = false;
+
+  pendingResult = { natural, firstRoll, secondRoll, rollMode, modifier, total, dc, passed };
   rolling = true;
   rollButton.setAttribute("aria-busy", "true");
   rollStatus.textContent = "Rolling...";
@@ -605,10 +703,9 @@ function finishRoll() {
   rollHint.textContent = rollMode === "normal"
     ? "Click to roll again"
     : `${rollMode === "advantage" ? "Adv" : "Dis"} ${firstRoll}/${secondRoll} - click again`;
-  if (currentDifficultyText) {
-    const modifierText = total === natural ? "" : ` (${natural} + mod = ${total})`;
-    setDifficultyStatus(`${currentDifficultyText}\nRolled ${natural}${modifierText} vs DC ${dc} - ${passed ? "Success" : "Fail"}`);
-  }
+  const modifier = total - natural;
+  setAiRollOutcome({ natural, modifier, dc, passed });
+  setDifficultyStatus("");
   resultBox.dataset.outcome = passed ? "pass" : "fail";
   resultBox.classList.add(passed ? "is-pass" : "is-fail");
   document.body.classList.add(passed ? "outcome-pass" : "outcome-fail");
@@ -616,6 +713,9 @@ function finishRoll() {
     diceMesh.userData.hitPulse = passed ? 1 : -1;
   });
   playOutcomeSound(passed);
+
+  // Trigger lock animation + (on pass) auto-click in the active tab.
+  sendExecuteToTab({ success: passed, value: natural, dc: pendingResult.dc });
 }
 
 function animate(now = performance.now()) {
@@ -812,3 +912,200 @@ updateDiceLayout();
 resize();
 startCaptureOnOpen();
 animate();
+
+// ------------------------------------------------------------------
+// Target panel: pick a DOM element on the active tab and lock it.
+// On a successful roll, content-script clicks the target automatically.
+// ------------------------------------------------------------------
+
+const pickButton = document.querySelector("#pickButton");
+const pickLabel = document.querySelector("#pickLabel");
+const clearTargetButton = document.querySelector("#clearTargetButton");
+
+let currentTarget = null;
+let stashedPickCapture = null;
+
+async function getActiveTabId() {
+  if (typeof chrome === "undefined" || !chrome.tabs) return null;
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return tab?.id ?? null;
+}
+
+async function ensureContentScript(tabId) {
+  if (!chrome.scripting?.executeScript) return false;
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["content-script.js"],
+    });
+    return true;
+  } catch (err) {
+    console.warn("[rollit] inject failed:", err?.message ?? err);
+    return false;
+  }
+}
+
+async function sendToTab(message, { autoInject = true } = {}) {
+  const tabId = await getActiveTabId();
+  if (tabId == null) return null;
+  try {
+    return await chrome.tabs.sendMessage(tabId, message);
+  } catch (err) {
+    if (!autoInject) {
+      console.warn("[rollit] tab message failed:", err?.message ?? err);
+      return null;
+    }
+    const injected = await ensureContentScript(tabId);
+    if (!injected) return null;
+    try {
+      return await chrome.tabs.sendMessage(tabId, message);
+    } catch (err2) {
+      console.warn("[rollit] tab message failed after inject:", err2?.message ?? err2);
+      return null;
+    }
+  }
+}
+
+function renderTarget(target) {
+  console.log("[rollit] renderTarget", target);
+  const previous = currentTarget;
+  currentTarget = target;
+  if (!pickButton || !pickLabel) return;
+  if (target) {
+    pickLabel.textContent = target.label || target.selector;
+    pickButton.classList.add("has-target");
+    if (clearTargetButton) clearTargetButton.hidden = false;
+    if (rollHint) rollHint.textContent = "Roll to let luck decide.";
+    // Auto-AI difficulty when a NEW target arrives (avoid re-firing on storage replays).
+    const isNewTarget = !previous || previous.selector !== target.selector || previous.ts !== target.ts;
+    if (isNewTarget) {
+      autoChooseDifficultyForTarget(target);
+    }
+  } else {
+    pickLabel.textContent = "Pick target";
+    pickButton.classList.remove("has-target");
+    if (clearTargetButton) clearTargetButton.hidden = true;
+  }
+}
+
+const situationLabelEl = document.querySelector("#situationLabel");
+
+function revealManualSituation(message) {
+  if (situationLabelEl) situationLabelEl.hidden = false;
+  if (chooseDifficultyButton) chooseDifficultyButton.hidden = false;
+  if (message) setDifficultyStatus(message);
+  if (situationInput) {
+    setTimeout(() => situationInput.focus(), 50);
+  }
+}
+
+function hideManualSituation() {
+  if (situationLabelEl) situationLabelEl.hidden = true;
+  if (chooseDifficultyButton) chooseDifficultyButton.hidden = true;
+}
+
+async function autoChooseDifficultyForTarget(target) {
+  console.log("[rollit] auto-DC start for", target.label);
+  if (!openRouterKey) {
+    console.warn("[rollit] no openRouterKey");
+    revealManualSituation("OpenRouter key missing. Describe the situation manually.");
+    return;
+  }
+  if (!pickButton || !pickLabel) return;
+  const originalLabel = pickLabel.textContent;
+  pickLabel.textContent = "AI choosing DC…";
+  pickButton.disabled = true;
+  pickButton.classList.add("is-loading");
+  hideManualSituation();
+  clearAiResult();
+  setDifficultyStatus("AI looking at the page…");
+
+  let result = { ok: false };
+  try {
+    // Prefer the clean capture taken pre-freeze by the content-script.
+    let capture = null;
+    if (stashedPickCapture && stashedPickCapture.ts === target.ts) {
+      capture = stashedPickCapture.capture;
+      stashedPickCapture = null;
+    } else {
+      capture = await captureCurrentTab();
+    }
+    result = await chooseDifficulty(capture, { targetLabel: target.label, autoRoll: false });
+  } catch (err) {
+    console.warn("[rollit] auto-DC failed:", err?.message ?? err);
+    result = { ok: false, error: err };
+  } finally {
+    pickButton.disabled = false;
+    pickButton.classList.remove("is-loading");
+    pickLabel.textContent = originalLabel;
+  }
+
+  if (!result?.ok) {
+    revealManualSituation("AI could not decide. Describe the situation manually below.");
+  }
+}
+
+async function refreshTargetFromStorage() {
+  if (typeof chrome === "undefined" || !chrome.storage?.session) return;
+  const { rollitTarget } = await chrome.storage.local.get("rollitTarget");
+  renderTarget(rollitTarget ?? null);
+}
+
+async function startPickFlow() {
+  if (!pickButton || !pickLabel) return;
+  pickButton.disabled = true;
+  pickLabel.textContent = "Click an element on the page…";
+  const res = await sendToTab({ type: "ROLLIT_START_PICKER" });
+  pickButton.disabled = false;
+  if (!res || !res.ok) {
+    pickLabel.textContent = "Pick target";
+    if (rollHint) rollHint.textContent = "Cannot inject on this page. Try a normal site.";
+    return;
+  }
+  if (rollHint) rollHint.textContent = "Pick an element on the page. Esc to cancel.";
+}
+
+async function clearTarget() {
+  await sendToTab({ type: "ROLLIT_CLEAR_TARGET" });
+  if (chrome?.storage?.session) await chrome.storage.local.remove("rollitTarget");
+  renderTarget(null);
+}
+
+function sendExecuteToTab({ success, value, dc }) {
+  sendToTab({
+    type: "ROLLIT_EXECUTE",
+    payload: { success, value: Number(value), dc: Number(dc) },
+  });
+}
+
+if (pickButton && clearTargetButton) {
+  pickButton.addEventListener("click", () => startPickFlow());
+  clearTargetButton.addEventListener("click", clearTarget);
+
+  if (chrome?.storage?.onChanged) {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      console.log("[rollit] storage changed", area, Object.keys(changes));
+      if (area === "session" && "rollitTarget" in changes) {
+        renderTarget(changes.rollitTarget.newValue ?? null);
+      }
+    });
+  }
+
+  // Belt + suspenders: also listen for direct runtime message from content-script.
+  // Content-script captures the screen BEFORE applying lock/freeze and ships it
+  // in the message; stash it so auto-DC uses the clean capture instead of the
+  // post-freeze captureCurrentTab.
+  if (chrome?.runtime?.onMessage) {
+    chrome.runtime.onMessage.addListener((msg) => {
+      if (msg?.type === "ROLLIT_PICKED") {
+        console.log("[rollit] ROLLIT_PICKED received", msg.label);
+        if (msg.capture) {
+          stashedPickCapture = { ts: msg.ts, capture: msg.capture };
+        }
+        refreshTargetFromStorage();
+      }
+    });
+  }
+
+  refreshTargetFromStorage();
+}

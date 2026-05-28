@@ -2,16 +2,27 @@
   "manifest_version": 3,
   "name": "Rollit",
   "version": "0.1.0",
-  "description": "Roll a 3D d20 for quick D&D-style checks.",
-  "permissions": ["activeTab", "storage", "tabs", "windows"],
-  "host_permissions": ["https://openrouter.ai/*"],
+  "description": "Roll a 3D d20 for quick D&D-style checks. Pick any button on the page and let luck decide.",
   "action": {
-    "default_popup": "index.html",
     "default_title": "Rollit"
   },
-  "background": {
-    "service_worker": "background.js"
+  "side_panel": {
+    "default_path": "index.html"
   },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "permissions": ["activeTab", "storage", "tabs", "scripting", "sidePanel", "windows"],
+  "host_permissions": ["<all_urls>", "https://openrouter.ai/*"],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content-script.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
   "commands": {
     "capture-and-roll": {
       "suggested_key": {
