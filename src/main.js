@@ -1,5 +1,22 @@
 import * as THREE from "three";
 import "./styles.css";
+import { createDiceEngine } from "./dice-engine.js";
+
+const RANDOM_ORG_KEY = import.meta.env.VITE_RANDOM_ORG_API_KEY;
+let diceEngine = null;
+
+if (RANDOM_ORG_KEY) {
+  diceEngine = createDiceEngine({
+    apiKey: RANDOM_ORG_KEY,
+    bufferSize: 1000,
+    onSourceChange: (src) => console.log(`[dice-engine] source: ${src}`),
+    onQuotaUpdate: (q) =>
+      console.log(`[dice-engine] quota bitsLeft=${q.bitsLeft} requestsLeft=${q.requestsLeft}`),
+  });
+  diceEngine.init().catch((err) => console.warn("[dice-engine] init failed:", err));
+} else {
+  console.warn("[dice-engine] VITE_RANDOM_ORG_API_KEY not set — using crypto fallback only");
+}
 
 const canvas = document.querySelector("#dice");
 const dcInput = document.querySelector("#dc");
@@ -320,9 +337,15 @@ function resize() {
 }
 
 function randomD20() {
+  if (diceEngine) return diceEngine.rollSync().value;
+  // Fallback when engine not initialized: rejection sampling to avoid modulo bias.
+  const RANGE = 20;
+  const LIMIT = Math.floor(0x100000000 / RANGE) * RANGE;
   const values = new Uint32Array(1);
-  crypto.getRandomValues(values);
-  return (values[0] % 20) + 1;
+  while (true) {
+    crypto.getRandomValues(values);
+    if (values[0] < LIMIT) return (values[0] % RANGE) + 1;
+  }
 }
 
 function getLandingQuaternion(number) {

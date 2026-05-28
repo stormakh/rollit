@@ -2,3 +2,7 @@ node_modules
 dist
 .expect
 .DS_Store
+.env
+.env.local
+research/results*.txt
+*.log
