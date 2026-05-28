@@ -393,7 +393,7 @@
     }
   }
 
-  function onPickClick(e) {
+  async function onPickClick(e) {
     if (!pickerActive) return;
     if (e.target.closest('#rollit-picker-banner')) return;
     e.preventDefault();
@@ -412,17 +412,27 @@
       return;
     }
 
-    // Persist + lock visually + freeze the page until the roll happens
-    chrome.storage.session.set({
-      rollitTarget: { selector, label, url: location.href, ts: Date.now() },
+    // Capture the page BEFORE applying lock/freeze so AI sees the real UI,
+    // not the dimmed spotlight overlay.
+    let capture = null;
+    try {
+      const res = await chrome.runtime.sendMessage({ type: 'capture-current-screen' });
+      if (res?.ok) capture = res.capture;
+    } catch (err) {
+      console.warn('[rollit] pre-capture failed:', err?.message ?? err);
+    }
+
+    const ts = Date.now();
+    chrome.storage.local.set({
+      rollitTarget: { selector, label, url: location.href, ts },
     });
     applyLock(selector);
     startFreeze();
 
-    // Notify popup (if listening) — popup queries storage on open instead
+    // Push capture inline to side panel/popup (storage stays slim).
     try {
-      chrome.runtime.sendMessage({ type: 'ROLLIT_PICKED', selector, label });
-    } catch (_) { /* popup may not be open */ }
+      chrome.runtime.sendMessage({ type: 'ROLLIT_PICKED', selector, label, ts, capture });
+    } catch (_) { /* nobody listening */ }
   }
 
   function onKeyDown(e) {
@@ -705,7 +715,7 @@
     endFreeze();
     if (!success) {
       removeLock();
-      chrome.storage.session.remove('rollitTarget');
+      chrome.storage.local.remove('rollitTarget');
       return { executed: false, reason: 'fail' };
     }
     if (!lockedSelector) {
@@ -715,19 +725,19 @@
     const el = document.querySelector(lockedSelector);
     if (!el) {
       removeLock();
-      chrome.storage.session.remove('rollitTarget');
+      chrome.storage.local.remove('rollitTarget');
       return { executed: false, reason: 'element-gone' };
     }
     programmaticClick(el);
     removeLock();
-    chrome.storage.session.remove('rollitTarget');
+    chrome.storage.local.remove('rollitTarget');
     return { executed: true };
   }
 
   // ---------- Restore lock + freeze on page load if same URL ----------
   (async () => {
     try {
-      const { rollitTarget } = await chrome.storage.session.get('rollitTarget');
+      const { rollitTarget } = await chrome.storage.local.get('rollitTarget');
       if (rollitTarget && rollitTarget.url === location.href) {
         applyLock(rollitTarget.selector);
         startFreeze();
@@ -752,7 +762,7 @@
       case 'ROLLIT_CLEAR_TARGET':
         removeLock();
         endFreeze();
-        chrome.storage.session.remove('rollitTarget');
+        chrome.storage.local.remove('rollitTarget');
         sendResponse({ ok: true });
         return false;
       case 'ROLLIT_FREEZE_START':
