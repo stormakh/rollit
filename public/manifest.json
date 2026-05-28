@@ -2,9 +2,25 @@
   "manifest_version": 3,
   "name": "Rollit",
   "version": "0.1.0",
-  "description": "Roll a 3D d20 for quick D&D-style checks.",
+  "description": "Roll a 3D d20 for quick D&D-style checks. Pick any button on the page and let luck decide.",
   "action": {
-    "default_popup": "index.html",
     "default_title": "Rollit"
-  }
+  },
+  "side_panel": {
+    "default_path": "index.html"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "permissions": ["activeTab", "storage", "tabs", "scripting", "sidePanel"],
+  "host_permissions": ["<all_urls>"],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content-script.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
 }

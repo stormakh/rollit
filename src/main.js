@@ -31,6 +31,9 @@ const rollValue = document.querySelector("#rollValue");
 const rollStatus = document.querySelector("#rollStatus");
 const rollHint = document.querySelector("#rollHint");
 const resultBox = rollButton;
+const pickButton = document.querySelector("#pickButton");
+const pickLabel = document.querySelector("#pickLabel");
+const clearTargetButton = document.querySelector("#clearTargetButton");
 
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 100);
@@ -360,6 +363,11 @@ function roll() {
   if (rolling) return;
   void getAudioContext().resume();
 
+  // Freeze the active page around the locked target before dice animation starts.
+  if (currentTarget) {
+    sendToTab({ type: "ROLLIT_FREEZE_START" });
+  }
+
   const rollMode = rollModeInput.value;
   const firstRoll = randomD20();
   const secondRoll = rollMode === "normal" ? null : randomD20();
@@ -372,7 +380,12 @@ function roll() {
   const modifier = Number.parseInt(modifierInput.value, 10) || 0;
   const total = natural + modifier;
 
-  pendingResult = { natural, firstRoll, secondRoll, rollMode, modifier, total, dc, passed: total >= dc };
+  // D&D rule: natural 20 always succeeds, natural 1 always fails, regardless of DC/modifier.
+  let passed = total >= dc;
+  if (natural === 20) passed = true;
+  if (natural === 1) passed = false;
+
+  pendingResult = { natural, firstRoll, secondRoll, rollMode, modifier, total, dc, passed };
   rolling = true;
   rollButton.setAttribute("aria-busy", "true");
   rollStatus.textContent = "Rolling...";
@@ -428,6 +441,9 @@ function finishRoll() {
   resultBox.classList.add(passed ? "is-pass" : "is-fail");
   die.userData.hitPulse = passed ? 1 : -1;
   playOutcomeSound(passed);
+
+  // Trigger lock animation + (on pass) auto-click in the active tab.
+  sendExecuteToTab({ success: passed, value: natural, dc: pendingResult.dc });
 }
 
 function animate(now = performance.now()) {
@@ -557,3 +573,125 @@ window.addEventListener("resize", resize);
 applyDicePreset(dicePresetInput.value);
 resize();
 animate();
+
+// ------------------------------------------------------------------
+// Target panel: pick a DOM element on the active tab and lock it.
+// On a successful roll, content-script clicks the target automatically.
+// ------------------------------------------------------------------
+
+let currentTarget = null;
+
+async function getActiveTabId() {
+  if (typeof chrome === "undefined" || !chrome.tabs) return null;
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return tab?.id ?? null;
+}
+
+async function ensureContentScript(tabId) {
+  if (!chrome.scripting?.executeScript) return false;
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["content-script.js"],
+    });
+    return true;
+  } catch (err) {
+    console.warn("[rollit] inject failed:", err?.message ?? err);
+    return false;
+  }
+}
+
+async function sendToTab(message, { autoInject = true } = {}) {
+  const tabId = await getActiveTabId();
+  if (tabId == null) return null;
+  try {
+    return await chrome.tabs.sendMessage(tabId, message);
+  } catch (err) {
+    if (!autoInject) {
+      console.warn("[rollit] tab message failed:", err?.message ?? err);
+      return null;
+    }
+    // Likely no content script in tab yet (page predates extension install).
+    const injected = await ensureContentScript(tabId);
+    if (!injected) return null;
+    try {
+      return await chrome.tabs.sendMessage(tabId, message);
+    } catch (err2) {
+      console.warn("[rollit] tab message failed after inject:", err2?.message ?? err2);
+      return null;
+    }
+  }
+}
+
+function renderTarget(target) {
+  currentTarget = target;
+  if (target) {
+    pickLabel.textContent = target.label || target.selector;
+    pickButton.classList.add("has-target");
+    clearTargetButton.hidden = false;
+    rollHint.textContent = "Roll to let luck decide.";
+  } else {
+    pickLabel.textContent = "Pick target";
+    pickButton.classList.remove("has-target");
+    clearTargetButton.hidden = true;
+  }
+}
+
+async function refreshTargetFromStorage() {
+  if (typeof chrome === "undefined" || !chrome.storage?.session) return;
+  const { rollitTarget } = await chrome.storage.session.get("rollitTarget");
+  renderTarget(rollitTarget ?? null);
+}
+
+async function startPickFlow() {
+  pickButton.disabled = true;
+  pickLabel.textContent = "Click an element on the page…";
+  const res = await sendToTab({ type: "ROLLIT_START_PICKER" });
+  pickButton.disabled = false;
+  if (!res || !res.ok) {
+    pickLabel.textContent = "Pick target";
+    rollHint.textContent = "Cannot inject on this page. Try a normal site.";
+    return;
+  }
+  rollHint.textContent = "Pick an element on the page. Esc to cancel.";
+  // Side panel stays open while user interacts with the page.
+  // storage.onChanged listener will update the panel when the target is captured.
+}
+
+async function clearTarget() {
+  await sendToTab({ type: "ROLLIT_CLEAR_TARGET" });
+  if (chrome?.storage?.session) await chrome.storage.session.remove("rollitTarget");
+  renderTarget(null);
+}
+
+function sendExecuteToTab({ success, value, dc }) {
+  // Always send so the page-side animation runs for both pass and fail
+  // even if no target was picked (overlay-only mode).
+  sendToTab({
+    type: "ROLLIT_EXECUTE",
+    payload: { success, value: Number(value), dc: Number(dc) },
+  });
+}
+
+if (pickButton && clearTargetButton) {
+  pickButton.addEventListener("click", () => {
+    if (currentTarget) {
+      // Already picked: re-pick replaces.
+      startPickFlow();
+    } else {
+      startPickFlow();
+    }
+  });
+  clearTargetButton.addEventListener("click", clearTarget);
+
+  // Live updates from storage (in case content script set target after popup opens).
+  if (chrome?.storage?.onChanged) {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === "session" && "rollitTarget" in changes) {
+        renderTarget(changes.rollitTarget.newValue ?? null);
+      }
+    });
+  }
+
+  refreshTargetFromStorage();
+}
